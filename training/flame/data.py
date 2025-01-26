@@ -207,7 +207,7 @@ class DataCollatorForLanguageModeling:
                 }
             else:
                 # If yes, check if we have a `pad_token`.
-                if self.tokenizer._pad_token is None:
+                if self.tokenizer.pad_token is None:
                     raise ValueError(
                         f"You are attempting to pad samples but the tokenizer you are using "
                         f"({self.tokenizer.__class__.__name__}) does not have a pad token."
@@ -243,4 +243,5 @@ class DataCollatorForLanguageModeling:
         if self.tokenizer.pad_token_id is not None:
             labels[labels == self.tokenizer.pad_token_id] = -100
         batch["labels"] = labels
+        # print(batch["input_ids"].shape)
         return batch

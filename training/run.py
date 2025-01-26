@@ -16,6 +16,7 @@ def main():
     args = get_train_args()
     logger.info(args)
 
+    print(args.tokenizer)
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer,
         use_fast=args.use_fast_tokenizer,
@@ -23,6 +24,7 @@ def main():
         add_bos_token=True,
         add_eos_token=False
     )
+    tokenizer.pad_token = tokenizer.eos_token
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
         logger.info("Add pad token: {}".format(tokenizer.pad_token))
