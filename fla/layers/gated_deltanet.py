@@ -212,19 +212,22 @@ class GatedDeltaNet(nn.Module):
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            seq_idx=kwargs.get('seq_idx', None)
+            position_ids = kwargs.get('position_ids', None)
             q, conv_state_q = self.q_conv1d(x=self.q_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_q,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
             k, conv_state_k = self.k_conv1d(x=self.k_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_k,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
             v, conv_state_v = self.v_conv1d(x=self.v_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_v,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
         else:
             q = self.silu(self.q_proj(hidden_states))
             k = self.silu(self.k_proj(hidden_states))
@@ -240,7 +243,7 @@ class GatedDeltaNet(nn.Module):
             g = g.mul(attention_mask[:, -g.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'chunk':
             o, recurrent_state = chunk_gated_delta_rule(
                 q=q,
@@ -250,7 +253,7 @@ class GatedDeltaNet(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True
             )
@@ -263,7 +266,7 @@ class GatedDeltaNet(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True
             )
@@ -272,7 +275,7 @@ class GatedDeltaNet(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[2]
+                offset=q.shape[1]
             )
 
         if self.use_gate:

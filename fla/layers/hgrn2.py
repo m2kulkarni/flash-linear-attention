@@ -120,19 +120,22 @@ class HGRN2Attention(nn.Module):
             if last_state is not None:
                 conv_state_q, conv_state_f, conv_state_i = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            seq_idx=kwargs.get('seq_idx', None)
+            position_ids = kwargs.get('position_ids', None)
             q, conv_state_q = self.q_conv1d(x=self.q_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_q,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
             f, conv_state_f = self.f_conv1d(x=self.f_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_f,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
             i, conv_state_i = self.i_conv1d(x=self.i_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_i,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
         else:
             q = self.q_proj(hidden_states)
             f = self.f_proj(hidden_states)
@@ -157,7 +160,7 @@ class HGRN2Attention(nn.Module):
         q, k, i, g = map(lambda x: rearrange(x, '... (h d) -> ... h d', h=self.num_heads), (q, k.to(i), i, g))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gla(
                 q=q,
@@ -166,7 +169,7 @@ class HGRN2Attention(nn.Module):
                 gk=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         elif mode == 'fused_chunk':
@@ -187,7 +190,7 @@ class HGRN2Attention(nn.Module):
                 g=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         else:
@@ -198,7 +201,7 @@ class HGRN2Attention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_f, conv_state_i) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[2]
+                offset=q.shape[1]
             )
 
         o = rearrange(o, '... h d -> ... (h d)')

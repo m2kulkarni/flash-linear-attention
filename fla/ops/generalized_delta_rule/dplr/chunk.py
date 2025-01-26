@@ -2,19 +2,23 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
 
+from typing import Optional
+
 import torch
 import triton
-import triton.language as tl
-from typing import Optional, Tuple
-from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import fwd_prepare_wy_repr 
-from fla.ops.generalized_delta_rule.dplr.chunk_A_fwd import chunk_fwd_intra_dplr_fn 
-from fla.ops.generalized_delta_rule.dplr.chunk_A_bwd import chunk_dplr_bwd_dqk_intra
-from fla.ops.generalized_delta_rule.dplr.chunk_o_fwd import chunk_dplr_fwd_o
-from fla.ops.generalized_delta_rule.dplr.chunk_h_fwd import chunk_dplr_fwd_h
+
+from fla.ops.generalized_delta_rule.dplr.chunk_A_bwd import \
+    chunk_dplr_bwd_dqk_intra
+from fla.ops.generalized_delta_rule.dplr.chunk_A_fwd import \
+    chunk_fwd_intra_dplr_fn
 from fla.ops.generalized_delta_rule.dplr.chunk_h_bwd import chunk_dplr_bwd_dhu
-from fla.ops.generalized_delta_rule.dplr.chunk_o_bwd import chunk_dplr_bwd_dAu, chunk_dplr_bwd_o, chunk_dplr_bwd_dv
+from fla.ops.generalized_delta_rule.dplr.chunk_h_fwd import chunk_dplr_fwd_h
+from fla.ops.generalized_delta_rule.dplr.chunk_o_bwd import (
+    chunk_dplr_bwd_dAu, chunk_dplr_bwd_dv, chunk_dplr_bwd_o)
+from fla.ops.generalized_delta_rule.dplr.chunk_o_fwd import chunk_dplr_fwd_o
 from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
-from fla.ops.utils.cumsum import chunk_local_cumsum
+from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import fwd_prepare_wy_repr
+from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 
 
@@ -35,22 +39,22 @@ def chunk_dplr_fwd(
 ):
     T = q.shape[2] if head_first else q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    gk_cumsum = chunk_local_cumsum(gk, BT, offsets=offsets, head_first=head_first)
-    
+    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, head_first=head_first)
+
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
         q=q,
         k=k,
         a=a,
         b=b,
-        g=gk_cumsum,
-        g_original=gk,
+        gi=gi,
+        ge=ge,
         scale=scale,
         offsets=offsets,
         indices=indices,
         BT=BT,
         head_first=head_first
     )
-    
+
     w, u, A_ab_inv = fwd_prepare_wy_repr(
         ag=ag,
         A_ab=A_ab,
@@ -67,7 +71,7 @@ def chunk_dplr_fwd(
         v=v,
         w=w,
         u=u,
-        gk=gk_cumsum,
+        gk=gi,
         initial_state=initial_state,
         output_final_state=output_final_state,
         offsets=offsets,
@@ -156,17 +160,17 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         offsets = ctx.offsets
         indices = ctx.indices
         scale = ctx.scale
-        
+
         # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
-        gk_cumsum = chunk_local_cumsum(gk, BT, offsets=offsets, head_first=head_first)
+        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, head_first=head_first)
 
         A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
             q=q,
             k=k,
             a=a,
             b=b,
-            g=gk_cumsum,
-            g_original=gk,
+            gi=gi,
+            ge=ge,
             scale=scale,
             offsets=offsets,
             indices=indices,
@@ -189,7 +193,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             v=v,
             w=w,
             u=u,
-            gk=gk_cumsum,
+            gk=gi,
             initial_state=initial_state,
             offsets=offsets,
             head_first=head_first,
@@ -210,12 +214,11 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             chunk_size=BT
         )
 
-
         dh, dh0, dv_new = chunk_dplr_bwd_dhu(
             qg=qg,
             bg=bg,
             w=w,
-            gk=gk_cumsum,
+            gk=gi,
             h0=initial_state,
             dht=dht,
             do=do,
@@ -235,7 +238,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             head_first=head_first,
             chunk_size=BT
         )
- 
+
         dqg, dkg, dw, dbg, dgk_last = chunk_dplr_bwd_o(
             k=kg,
             b=bg,
@@ -246,7 +249,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dh=dh,
             dv=dv_new,
             w=w,
-            gk=gk_cumsum,
+            gk=gi,
             offsets=offsets,
             indices=indices,
             chunk_size=BT,
@@ -272,8 +275,8 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             k=k,
             a=a,
             b=b,
-            gi=gk_cumsum,
-            ge=gk_cumsum-gk,
+            gi=gi,
+            ge=ge,
             dAqk=dA_qk,
             dAqb=dA_qb,
             dAak=dA_ak,
@@ -290,7 +293,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             indices=indices
         )
         dv.add_(dv2)
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), da.to(a.dtype), db.to(b.dtype), dgk.to(gk.dtype), None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None, None
 
 
 def chunk_dplr_delta_rule(
@@ -303,7 +306,7 @@ def chunk_dplr_delta_rule(
     scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False
 ):
     r"""
@@ -329,12 +332,9 @@ def chunk_dplr_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `False`.
@@ -349,15 +349,15 @@ def chunk_dplr_delta_rule(
     # assert q.dtype != torch.float32, "ChunkDeltaRuleFunction does not support float32. Please use bfloat16."
     # gk = gk.float()
 
-    if offsets is not None:
+    if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
+            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                              f"Please flatten variable-length inputs before processing.")
         if head_first:
             raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
-        if initial_state is not None and initial_state.shape[0] != len(offsets) - 1:
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(offsets) - 1} rather than {initial_state.shape[0]}.")
+                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
     scale = k.shape[-1] ** -0.5 if scale is None else scale
     o, final_state = ChunkDPLRDeltaRuleFunction.apply(
         q,
@@ -369,7 +369,7 @@ def chunk_dplr_delta_rule(
         scale,
         initial_state,
         output_final_state,
-        offsets,
+        cu_seqlens,
         head_first
     )
     return o, final_state

@@ -16,8 +16,8 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 from fla.layers.attn import Attention
-from fla.layers.rwkv6 import LerpLinear, RWKV6Attention
-from fla.models.rwkv6.configuration_rwkv6 import RWKV6Config
+from fla.layers.rwkv7 import RWKV7Attention
+from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
 from fla.models.utils import Cache
 from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
                          LayerNorm)
@@ -26,7 +26,7 @@ from fla.modules.activations import ACT2FN
 logger = logging.get_logger(__name__)
 
 
-class RWKV6FeedForward(nn.Module):
+class RWKV7FeedForward(nn.Module):
 
     def __init__(
         self,
@@ -35,12 +35,12 @@ class RWKV6FeedForward(nn.Module):
         intermediate_size: Optional[int] = None,
         hidden_act: str = 'sqrelu',
         layer_idx: int = None
-    ) -> RWKV6FeedForward:
+    ) -> RWKV7FeedForward:
         super().__init__()
 
         self.hidden_size = hidden_size
         if hidden_ratio is None:
-            hidden_ratio = 3.5
+            hidden_ratio = 4
         if intermediate_size is None:
             intermediate_size = int(hidden_size * hidden_ratio)
             intermediate_size = 32 * ((intermediate_size + 32 - 1) // 32)
@@ -49,9 +49,10 @@ class RWKV6FeedForward(nn.Module):
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
-        self.key = LerpLinear(hidden_size, intermediate_size)
+        self.x_k = nn.Parameter(torch.empty(1, 1, hidden_size))
+
+        self.key = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.value = nn.Linear(intermediate_size, hidden_size, bias=False)
-        self.receptance = LerpLinear(hidden_size, hidden_size)
         self.act_fn = ACT2FN[hidden_act]
 
         self.layer_idx = layer_idx
@@ -59,30 +60,20 @@ class RWKV6FeedForward(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        state: Optional[Cache] = None
+        **kwargs
     ) -> torch.Tensor:
-        if attention_mask is not None:
-            x = x.mul_(attention_mask[:, -x.shape[-2]:, None])
-        if x.shape[1] == 1 and state is not None:
-            shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
-        else:
-            shifted = self.time_shift(x)
-            if state is not None and state[self.layer_idx]['ffn_state'] is not None:
-                shifted[:, 0] = state[self.layer_idx]['ffn_state'][-1]
-        delta = shifted - x
-        key = self.act_fn(self.key(x, delta))
-        value = self.value(key)
-        receptance = self.receptance(x, delta)
-
-        if state is not None:
-            # no need to update the offset twice
-            state.update(ffn_state=x[:, -1], layer_idx=self.layer_idx, offset=0)
-        return receptance.sigmoid() * value, state
+        delta = self.time_shift(x) - x
+        key = self.act_fn(self.key(x + delta * self.x_k))
+        return self.value(key)
 
 
-class RWKV6Block(nn.Module):
-    def __init__(self, config: RWKV6Config, layer_idx: int):
+class RWKV7Block(nn.Module):
+
+    def __init__(
+        self,
+        config: RWKV7Config,
+        layer_idx: int
+    ) -> RWKV7Block:
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -102,20 +93,21 @@ class RWKV6Block(nn.Module):
                 layer_idx=layer_idx
             )
         else:
-            self.attn = RWKV6Attention(
+            self.attn = RWKV7Attention(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
-                expand_k=config.expand_k,
-                expand_v=config.expand_v,
+                head_dim=config.head_dim,
                 num_heads=config.num_heads,
-                proj_low_rank_dim=config.proj_low_rank_dim,
+                decay_low_rank_dim=config.decay_low_rank_dim,
                 gate_low_rank_dim=config.gate_low_rank_dim,
+                a_low_rank_dim=config.a_low_rank_dim,
+                v_low_rank_dim=config.v_low_rank_dim,
                 norm_eps=config.norm_eps,
                 fuse_norm=config.fuse_norm,
                 layer_idx=layer_idx
             )
         self.ffn_norm = LayerNorm(hidden_size=config.hidden_size, bias=config.norm_bias, eps=config.norm_eps)
-        self.ffn = RWKV6FeedForward(
+        self.ffn = RWKV7FeedForward(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -143,7 +135,7 @@ class RWKV6Block(nn.Module):
             **kwargs
         )
         hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
-        hidden_states, past_key_values = self.ffn(hidden_states, attention_mask, past_key_values)
+        hidden_states = self.ffn(hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states, attentions, past_key_values)
@@ -151,11 +143,11 @@ class RWKV6Block(nn.Module):
         return outputs
 
 
-class RWKV6PreTrainedModel(PreTrainedModel):
+class RWKV7PreTrainedModel(PreTrainedModel):
 
-    config_class = RWKV6Config
+    config_class = RWKV7Config
     supports_gradient_checkpointing = True
-    _no_split_modules = ['RWKV6Block']
+    _no_split_modules = ['RWKV7Block']
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
@@ -198,15 +190,15 @@ class RWKV6PreTrainedModel(PreTrainedModel):
                         p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class RWKV6Model(RWKV6PreTrainedModel):
+class RWKV7Model(RWKV7PreTrainedModel):
 
-    def __init__(self, config: RWKV6Config):
+    def __init__(self, config: RWKV7Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([RWKV6Block(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([RWKV7Block(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = LayerNorm(config.hidden_size, bias=config.norm_bias, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -232,7 +224,7 @@ class RWKV6Model(RWKV6PreTrainedModel):
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
-            warnings.warn("`RWKV6Model` does not `output_attentions` now, setting it to `False`.")
+            warnings.warn("`RWKV7Model` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -301,13 +293,13 @@ class RWKV6Model(RWKV6PreTrainedModel):
         )
 
 
-class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
+class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = RWKV6Model(config)
+        self.model = RWKV7Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
