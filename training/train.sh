@@ -16,10 +16,10 @@ echo "context:          ${context:=1024}"
 echo "steps:            ${steps:=0}"
 echo "save:             ${save:=2048}"
 echo "limit:            ${limit:=1}"
-echo "preprocessing:    ${preprocessing:=32}"
-echo "workers:          ${workers:=32}"
+echo "preprocessing:    ${preprocessing:=16}"
+echo "workers:          ${workers:=16}"
 echo "prefetch:         ${prefetch:=2}"
-echo "logging:          ${logging:=32}"
+echo "logging:          ${logging:=16}"
 echo "config:           ${config:=configs/deepspeed.yaml}"
 
 echo "lr:               ${lr:=3e-4}"
@@ -80,8 +80,19 @@ fi
 if [ "$name" != "" ]; then
   params+=" --dataset_name $name"
 fi
-if [ "$cache" != "" ]; then
-  params+=" --cache_dir $cache"
+# if [ "$cache" != "" ]; then
+#   params+=" --cache_dir $cache"
+# fi
+echo "cache: $cache"
+if [ -n "$cache" ]; then
+  cache_dirs=(${cache//,/ })
+  for dir in "${CACHE_DIRS[@]}"; do
+    if [ -d "$dir" ]; then
+      params+=" --cache_dir $dir"
+    else
+      echo "Warning: Cache directory does not exist - $dir"
+    fi
+  done
 fi
 if [ "$varlen" == "true" ]; then
   params+=" --varlen"
@@ -103,7 +114,7 @@ if [ "$rank" != "" ]; then
     --num_processes $((nodes * gpus)) \
     --num_machines $nodes \
     --main_process_ip $ip \
-    --main_process_port $port \
+    --main_process_port 0 \
     --same_network"
 fi
 

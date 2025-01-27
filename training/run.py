@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from datasets import load_from_disk
+from datasets import load_from_disk, concatenate_datasets
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           Trainer)
 
@@ -41,8 +41,15 @@ def main():
     logger.info(f"{tokenizer}\n{model}\n{model.config}")
 
     logger.info(f"Loading the `{args.split}` split directly from the cache {args.cache_dir}...")
-    dataset = load_from_disk(args.cache_dir)
-    logger.info(f"{dataset}")
+
+    cache_dirs =  ["/n/home01/mkulkarni/projects/inference-scaling/data/gsm8k/main/train","/n/home01/mkulkarni/projects/inference-scaling/data/math/train"]
+    dataset = None
+    for cache_dir in cache_dirs:
+        # if not cache_dir.exists():
+        #     raise ValueError(f"Cache directory {cache_dir} does not exist.") 
+        dataset = concatenate_datasets([load_from_disk(cache_dir), dataset]) if dataset is not None else load_from_disk(cache_dir)
+    
+    # logger.info(f"{dataset}")
     logger.info(f"Shuffling the dataset with seed {args.seed}")
     dataset = dataset.shuffle(seed=args.seed)
     logger.info("Creating the data collator")

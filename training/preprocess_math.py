@@ -17,9 +17,11 @@ from transformers import AutoTokenizer
 from transformers.utils import logging
 logger = logging.get_logger(__name__)
 # ========== Math Processing Core ==========
-DEFAULT_SYSTEM_PROMPT = """Solve the following math problem efficiently and clearly:
+DEFAULT_SYSTEM_PROMPT = """
+Solve the following math problem efficiently and clearly:
 
 - For simple problems (2 steps or fewer):
+
 Provide a concise solution with minimal explanation.
 
 - For complex problems (3 steps or more):
@@ -39,7 +41,8 @@ Therefore, the final answer is: $\\boxed{answer}$. I hope it is correct.
 
 Where [answer] is just the final number or expression that solves the problem."""
 
-MATH_CHAT_TEMPLATE = """{% if messages[0]['role'] == 'system' %}
+MATH_CHAT_TEMPLATE = """
+{% if messages[0]['role'] == 'system' %}
     {% set system_message = messages[0]['content']|trim %}
     {% set messages = messages[1:] %}
 {% else %}
@@ -102,21 +105,24 @@ def parse_math_response(response: str) -> dict:
         
         final_answer = match.group(1)
         # Remove final answer from solution text
-        solution = re.sub(r"\\boxed{[^}]*}", "", response).strip()
+        solution = re.sub(r"\\boxed{[^}]*}$", "", response).strip()
     
     # Split solution into logical steps
     steps = []
     current_step = []
     for line in solution.split("\n"):
         line = line.strip()
-        if line.startswith(("**", "For ", "Step ", "Then ", "Similarly", "Therefore")):
-            if current_step:
-                steps.append(" ".join(current_step))
-                current_step = []
-        current_step.append(line)
+        if line == "":
+            continue
+        steps.append(line)
+        # if line.startswith(("**", "For ", "Step ", "Then ", "Similarly", "Therefore")):
+        #     if current_step:
+        #         steps.append(" ".join(current_step))
+        #         current_step = []
+        # current_step.append(line)
     
-    if current_step:
-        steps.append(" ".join(current_step))
+    # if current_step:
+    #     steps.append(" ".join(current_step))
     
     return {
         "reasoning": steps,
@@ -124,7 +130,7 @@ def parse_math_response(response: str) -> dict:
         "step_count": len(steps)
     }
 
-def format_math_example(example: dict, dataset_type: str) -> dict:
+def format_math_example(example: dict, dataset_type: str, split: str = "train") -> dict:
     """Format examples for different math datasets"""
     if dataset_type == "gsm8k":
         question = example["question"]
@@ -145,13 +151,21 @@ def format_math_example(example: dict, dataset_type: str) -> dict:
     response = "\n\n".join(response_lines)
     response += f"\n\nTherefore, the final answer is: $\\boxed{{{parsed['final_answer']}}}$. I hope it is correct."
 
-    return {
-        "messages": [
-            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-            {"role": "user", "content": question},
-            {"role": "assistant", "content": response}
-        ]
-    }
+    if split == "test":
+        return {
+            "messages": [
+                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                {"role": "user", "content": question}
+            ]
+        }
+    else:
+        return {
+            "messages": [
+                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": response}
+            ]
+        }
 
 def tokenize_math(
     examples: Dict[str, List[Any]], 
@@ -198,7 +212,7 @@ def preprocess_math(
     
     logger.info(f"Formatting {len(dataset)} examples...")
     dataset = dataset.map(
-        lambda x: format_math_example(x, dataset_type),
+        lambda x: format_math_example(x, dataset_type, split=split),
         num_proc=num_proc,
         remove_columns=dataset.column_names
     )
